@@ -2,10 +2,29 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
+from torch.utils.data import DataLoader, Subset
 import torchvision
-import torchvision.transforms as transforms
+from  torchvision import transforms, datasets
 import matplotlib.pyplot as plt
 import numpy as np
+import os
+from sklearn.model_selection import train_test_split
+
+SCRIPT_PATH = os.path.abspath(os.path.dirname(__file__))
+data_dir = os.path.join(SCRIPT_PATH,"spectrograms")
+
+dataset = datasets.ImageFolder(data_dir,transform=transforms.Compose([transforms.Resize((224,224)), transforms.ToTensor()]))
+labels = dataset.targets
+indicies = list(range(len(dataset)))
+
+train_indexes, temp_indexes, train_labels, temp_labels = train_test_split(indicies, labels,train_size=0.7,random_state=42,stratify=labels)
+test_indexes, validate_indexes, test_labels, validate_labels = train_test_split(temp_indexes, temp_labels,train_size=0.67,random_state=42,stratify=labels)
+
+train_data = Subset(dataset, train_indexes)
+test_data = Subset(dataset, test_indexes)
+validate_data = Subset(dataset, validate_indexes)
+
+loaded_training_data = DataLoader(train_data,batch_size=32,shuffle=True)
 
 class Block(nn.Module):
     def __init__(self, in_channels, out_channels, identity_downsample = None, stride = 1):
@@ -85,9 +104,4 @@ if __name__ == "__main__":
     x = torch.randn(1,3,224,224)
     y = resNet34(x)
     print(y.shape)
-    count = 0
-    for param in resNet34.layer1.parameters():
-        print(param)
-        count+=1
-        if count >= 1:
-            break
+    
