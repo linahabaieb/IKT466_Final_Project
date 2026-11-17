@@ -9,22 +9,41 @@ import matplotlib.pyplot as plt
 import numpy as np
 import os
 from sklearn.model_selection import train_test_split
+from collections import Counter
+from datetime import datetime
+import argparse
+from tqdm import tqdm
+from glob import glob
 
 SCRIPT_PATH = os.path.abspath(os.path.dirname(__file__))
 data_dir = os.path.join(SCRIPT_PATH,"spectrograms")
 
 dataset = datasets.ImageFolder(data_dir,transform=transforms.Compose([transforms.Resize((224,224)), transforms.ToTensor()]))
-labels = dataset.targets
-indicies = list(range(len(dataset)))
 
-train_indexes, temp_indexes, train_labels, temp_labels = train_test_split(indicies, labels,train_size=0.7,random_state=42,stratify=labels)
-test_indexes, validate_indexes, test_labels, validate_labels = train_test_split(temp_indexes, temp_labels,train_size=0.67,random_state=42,stratify=labels)
+counts = Counter(dataset.targets)
+
+usable_classes = {
+    class_id for class_id, count in counts.items() if count > 10
+}
+
+usable_indices = [
+    data_index for data_index, target in enumerate(dataset.targets) if target in usable_classes
+]
+
+filtered_labels = [dataset.targets[i] for i in usable_indices]
+
+train_indexes, temp_indexes, train_labels, temp_labels = train_test_split(usable_indices, filtered_labels,train_size=0.7,random_state=42,stratify=filtered_labels)
+test_indexes, validate_indexes = train_test_split(temp_indexes,train_size=0.67,random_state=42,stratify=temp_labels)
 
 train_data = Subset(dataset, train_indexes)
 test_data = Subset(dataset, test_indexes)
 validate_data = Subset(dataset, validate_indexes)
 
 loaded_training_data = DataLoader(train_data,batch_size=32,shuffle=True)
+loaded_test_data = DataLoader(test_data,batch_size=32,shuffle=True)
+loaded_validation_data = DataLoader(validate_data,batch_size=32,shuffle=True)
+
+
 
 class Block(nn.Module):
     def __init__(self, in_channels, out_channels, identity_downsample = None, stride = 1):
@@ -54,6 +73,8 @@ class Block(nn.Module):
 class ResNet(nn.Module):
     def __init__(self, block, layers, image_channels, num_classes): 
         super(ResNet,self).__init__()
+
+        # Layers
         self.in_channels = 64
         self.conv1 = nn.Conv2d(image_channels,64,kernel_size=7,stride=2,padding=3)
         self.batch_norm_layer1 = nn.BatchNorm2d(64)
@@ -99,9 +120,108 @@ class ResNet(nn.Module):
 
         return x
 
+def train_epoch(batch_report=20):
+    total_loss = 0
+    last_loss = 0
+
+    for index, data in enumerate(loaded_training_data):
+        inputs, labels = data
+        inputs = inputs.to(device)
+        labels = labels.to(device)
+
+        optimizer.zero_grad()
+
+        outputs = resNet34(inputs)
+
+        loss = loss_fn(outputs,labels)
+        loss.backward()
+
+        optimizer.step()
+
+        total_loss += loss.item()
+        if (index + 1) % batch_report == 0:
+            last_loss = total_loss / batch_report
+            print(f'  batch {index + 1} loss: {last_loss}')
+            total_loss = 0.
+    return last_loss
+
 if __name__ == "__main__":
-    resNet34 = ResNet(Block,[3,4,6,3],3,192)
-    x = torch.randn(1,3,224,224)
-    y = resNet34(x)
-    print(y.shape)
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--train", action="store_true")
+    
+    args = parser.parse_args()
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    resNet34 = ResNet(Block,[3,4,6,3],3,len(dataset.classes)).to(device)
+    print("Using:", device)
+    if args.train == True:
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        
+        
+        loss_fn = torch.nn.CrossEntropyLoss()
+        optimizer = torch.optim.SGD(resNet34.parameters(), lr=0.001, momentum=0.9)
+
+        current_epoch = 0
+
+        total_epochs = 5
+
+        best_loss = 1_000_000
+
+        for epoch in range(total_epochs):
+            print(f"EPOCH: {current_epoch}")
+
+            resNet34.train(True)
+            avg_loss = train_epoch()
+
+
+            total_test_loss = 0
+            resNet34.eval()
+
+            with torch.no_grad():
+                for test_index, test_data in enumerate(loaded_test_data):
+                    test_inputs, test_labels = test_data
+                    test_inputs = test_inputs.to(device)
+                    test_labels = test_labels.to(device)
+                    test_outputs = resNet34(test_inputs)
+                    test_loss = loss_fn(test_outputs,test_labels)
+
+                    total_test_loss += test_loss.item()
+
+            avg_test_loss = total_test_loss/(len(loaded_test_data)+1)
+
+            if avg_test_loss < best_loss:
+                best_loss = avg_test_loss
+                model_path = f"model34_{timestamp}_{current_epoch}"
+                torch.save(resNet34.state_dict(), model_path)
+
+            current_epoch += 1
+
+    matches = glob(f"model34_{timestamp}_*")
+
+    if not matches:
+        raise FileNotFoundError(f"No checkpoints found for {timestamp}")
+
+    best_state = max(matches, key=lambda path: int(os.path.basename(path).rsplit("_", 1)[-1]))
+
+    state_dict = torch.load(best_state, map_location=device, weights_only=True)
+    resNet34.load_state_dict(state_dict)
+    resNet34.eval()
+
+    accuracy_counter = Counter()
+    for i in tqdm(range(min(2000, len(validate_data)))):
+        image, true_label = validate_data[i]
+        with torch.no_grad():
+            image = image.unsqueeze(0).to(device)
+            logits = resNet34(image)
+            predicted_id = logits.argmax(dim=1).item()
+
+        prediction_truth = dataset.classes[predicted_id] == dataset.classes[true_label]
+        accuracy_counter[prediction_truth] += 1
+    print(f"Accuracy: {accuracy_counter[True]/(accuracy_counter[True]+accuracy_counter[False])}")
+
+
+
+
+
+
+
     

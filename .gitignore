@@ -21,3 +21,5 @@ data/
 *.pkl
 
 *.png
+
+model*
