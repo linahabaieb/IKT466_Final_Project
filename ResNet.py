@@ -14,16 +14,17 @@ from datetime import datetime
 import argparse
 from tqdm import tqdm
 from glob import glob
+from sklearn.metrics import precision_score, recall_score, accuracy_score
 
 SCRIPT_PATH = os.path.abspath(os.path.dirname(__file__))
 data_dir = os.path.join(SCRIPT_PATH,"spectrograms")
 
 dataset = datasets.ImageFolder(data_dir,transform=transforms.Compose([transforms.Resize((224,224)), transforms.ToTensor()]))
 
-counts = Counter(dataset.targets)
+class_sizes = Counter(dataset.targets)
 
 usable_classes = {
-    class_id for class_id, count in counts.items() if count > 10
+    class_id for class_id, count in class_sizes.items() if count > 10
 }
 
 usable_indices = [
@@ -39,9 +40,9 @@ train_data = Subset(dataset, train_indexes)
 test_data = Subset(dataset, test_indexes)
 validate_data = Subset(dataset, validate_indexes)
 
-loaded_training_data = DataLoader(train_data,batch_size=32,shuffle=True)
-loaded_test_data = DataLoader(test_data,batch_size=32,shuffle=True)
-loaded_validation_data = DataLoader(validate_data,batch_size=32,shuffle=True)
+loaded_training_data = DataLoader(train_data,batch_size=64,shuffle=True)
+loaded_test_data = DataLoader(test_data,batch_size=64,shuffle=True)
+loaded_validation_data = DataLoader(validate_data,batch_size=64,shuffle=True)
 
 
 
@@ -146,6 +147,7 @@ def train_epoch(batch_report=20):
     return last_loss
 
 if __name__ == "__main__":
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
     parser = argparse.ArgumentParser()
     parser.add_argument("--train", action="store_true")
     
@@ -154,11 +156,9 @@ if __name__ == "__main__":
     resNet34 = ResNet(Block,[3,4,6,3],3,len(dataset.classes)).to(device)
     print("Using:", device)
     if args.train == True:
-        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        
         
         loss_fn = torch.nn.CrossEntropyLoss()
-        optimizer = torch.optim.SGD(resNet34.parameters(), lr=0.001, momentum=0.9)
+        optimizer = torch.optim.SGD(resNet34.parameters(), lr=0.01, momentum=0.9)
 
         current_epoch = 0
 
@@ -195,29 +195,74 @@ if __name__ == "__main__":
 
             current_epoch += 1
 
-    matches = glob(f"model34_{timestamp}_*")
+    matches = glob(f"model34_*_4")
 
     if not matches:
         raise FileNotFoundError(f"No checkpoints found for {timestamp}")
 
-    best_state = max(matches, key=lambda path: int(os.path.basename(path).rsplit("_", 1)[-1]))
+    latest_day = max(matches, key=lambda path: int(os.path.basename(path).split("_")[-3]))
+    tied_for_latest_day = [state_file for state_file in matches if int(os.path.basename(state_file).split("_")[-3]) == int(os.path.basename(latest_day).split("_")[-3])]
+    best_state = max(tied_for_latest_day, key=lambda path: int(os.path.basename(path).split("_")[-2]))
 
     state_dict = torch.load(best_state, map_location=device, weights_only=True)
     resNet34.load_state_dict(state_dict)
     resNet34.eval()
 
-    accuracy_counter = Counter()
-    for i in tqdm(range(min(2000, len(validate_data)))):
-        image, true_label = validate_data[i]
-        with torch.no_grad():
-            image = image.unsqueeze(0).to(device)
-            logits = resNet34(image)
-            predicted_id = logits.argmax(dim=1).item()
+    all_predictions = []
+    all_targets = []
+    with torch.no_grad():
+        for images, true_labels in loaded_validation_data:
+            images = images.to(device)
+            predictions = resNet34(images).argmax(dim=1).cpu()
 
-        prediction_truth = dataset.classes[predicted_id] == dataset.classes[true_label]
-        accuracy_counter[prediction_truth] += 1
-    print(f"Accuracy: {accuracy_counter[True]/(accuracy_counter[True]+accuracy_counter[False])}")
+            for true_label, prediction in zip(true_labels,predictions):
+                all_predictions.append(prediction)
+                all_targets.append(true_label)
 
+    sorted_class_sizes = sorted(class_sizes.items(), key=lambda pair: pair[1],reverse=True)
+    top_classes = sorted_class_sizes[:20]
+
+    top_class_ids = {label for label, _ in top_classes}
+    top_classses_predicitons = [(pred.item(),target.item()) for pred, target in zip(all_predictions,all_targets) if target.item() in top_class_ids]
+
+    sortet_predictions = [t[0] for t in top_classses_predicitons]
+    sortet_targets = [t[1] for t in top_classses_predicitons]
+
+    sk_accuracy = accuracy_score(sortet_targets, sortet_predictions)
+    sk_precision = precision_score(sortet_targets, sortet_predictions,average="macro", zero_division=0)
+    sk_recall = recall_score(sortet_targets, sortet_predictions,average="macro", zero_division=0)
+
+    print(f"Overall sk_accuracy:{sk_accuracy}")
+    print(f"Overall sk_precision: {sk_precision}")
+    print(f"Overall sk_recall: {sk_recall}")
+
+    label_counter = dataset.class_to_idx
+    counter_per_label = {int_label:Counter() for int_label in label_counter.values()}
+
+    with torch.no_grad():
+        for i in tqdm(range(min(2000, len(validate_data)))):
+            image, true_label = validate_data[i]
+            with torch.no_grad():
+                image = image.unsqueeze(0).to(device)
+                logits = resNet34(image)
+                predicted_id = logits.argmax(dim=1).item()
+
+            prediction_bool = predicted_id == true_label
+
+            counter_per_label[true_label][prediction_bool] += 1
+
+    eval_subset_targets = [validate_data[i][1] for i in range(len(validate_data))]
+    eval_class_sizes = Counter(eval_subset_targets)
+
+    accuracy_per_label = []
+    accuracy_sum = 0
+    for label, counter in counter_per_label.items():
+        total = counter[True] + counter[False]
+        accuracy = counter[True] / total if total else 0.0
+        accuracy_per_label.append((label,accuracy,class_sizes[label]))
+        accuracy_sum += accuracy
+    accuracy_avg = accuracy_sum/len(counter_per_label)
+    print(f"Accuracy Per Class: {accuracy_per_label}")
 
 
 
