@@ -219,22 +219,45 @@ if __name__ == "__main__":
                 all_predictions.append(prediction)
                 all_targets.append(true_label)
 
+    topX = 20
     sorted_class_sizes = sorted(class_sizes.items(), key=lambda pair: pair[1],reverse=True)
-    top_classes = sorted_class_sizes[:20]
+    top_classes = sorted_class_sizes[:topX]
 
     top_class_ids = {label for label, _ in top_classes}
     top_classses_predicitons = [(pred.item(),target.item()) for pred, target in zip(all_predictions,all_targets) if target.item() in top_class_ids]
 
     sortet_predictions = [t[0] for t in top_classses_predicitons]
     sortet_targets = [t[1] for t in top_classses_predicitons]
-
     sk_accuracy = accuracy_score(sortet_targets, sortet_predictions)
     sk_precision = precision_score(sortet_targets, sortet_predictions,average="macro", zero_division=0)
     sk_recall = recall_score(sortet_targets, sortet_predictions,average="macro", zero_division=0)
+    print(f"Top Overall sk_accuracy:{sk_accuracy}")
+    print(f"Top Overall sk_precision: {sk_precision}")
+    print(f"Top Overall sk_recall: {sk_recall}")
 
-    print(f"Overall sk_accuracy:{sk_accuracy}")
-    print(f"Overall sk_precision: {sk_precision}")
-    print(f"Overall sk_recall: {sk_recall}")
+    per_class_predictions = {}
+    per_class_scores = {}
+    for int_label in dataset.class_to_idx.values():
+        class_results = [t for t in top_classses_predicitons if  int(int_label) == int(t[1])]
+        if len(class_results) == 0:
+            continue
+        classs_predictions = [t[0] for t in class_results]
+        class_targets = [t[1] for t in class_results]
+        per_class_predictions[int_label] = [classs_predictions,class_targets]
+        class_acc = accuracy_score(class_targets, classs_predictions)
+        class_prec = precision_score(class_targets, classs_predictions,average="macro", zero_division=0)
+        class_rec = recall_score(class_targets, classs_predictions,average="macro", zero_division=0)
+        per_class_scores[int_label] = (class_acc,class_prec,class_rec)
+
+    print(f"| Class | Accuracy | Precision | Recall |")
+    for key, value in per_class_scores.items():
+        print(f"|{key}|{round(value[0],2)}|{round(value[1],2)}|{round(value[2],2)}|")
+
+    print(f"Top {topX} classes: {top_classes}")
+
+
+    ##########################################################################
+
 
     label_counter = dataset.class_to_idx
     counter_per_label = {int_label:Counter() for int_label in label_counter.values()}
