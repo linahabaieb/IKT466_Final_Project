@@ -87,6 +87,13 @@ class ResNet(nn.Module):
         self.layer3 = self._make_layer(block,layers[2],256,2)
         self.layer4 = self._make_layer(block,layers[3],512,2)
 
+        final_channels = 512
+
+        self.input_shortcut = nn.Sequential(
+            nn.Conv2d(image_channels, final_channels, kernel_size=1, stride=32, bias=False),
+            nn.BatchNorm2d(final_channels),
+        )
+
         self.avg_pool = nn.AdaptiveAvgPool2d((1,1))
         self.fc = nn.Linear(512, num_classes)
 
@@ -106,6 +113,7 @@ class ResNet(nn.Module):
         return nn.Sequential(*layers)
 
     def forward(self,x):
+        identity = self.input_shortcut(x)
         x = self.conv1(x)
         x = self.batch_norm_layer1(x)
         x = self.relu(x)
@@ -114,6 +122,7 @@ class ResNet(nn.Module):
         x = self.layer2(x)
         x = self.layer3(x)
         x = self.layer4(x)
+        x = x + identity
 
         x = self.avg_pool(x)
         x = torch.flatten(x, 1)
@@ -202,7 +211,9 @@ if __name__ == "__main__":
 
     latest_day = max(matches, key=lambda path: int(os.path.basename(path).split("_")[-3]))
     tied_for_latest_day = [state_file for state_file in matches if int(os.path.basename(state_file).split("_")[-3]) == int(os.path.basename(latest_day).split("_")[-3])]
-    best_state = max(tied_for_latest_day, key=lambda path: int(os.path.basename(path).split("_")[-2]))
+    latest_time = max(tied_for_latest_day, key=lambda path: int(os.path.basename(path).split("_")[-2]))
+    tied_for_latest_time = [state_file for state_file in tied_for_latest_day if int(os.path.basename(state_file).split("_")[-3]) == int(os.path.basename(latest_time).split("_")[-3])]
+    best_state = max(tied_for_latest_time, key=lambda path: int(os.path.basename(path).split("_")[-1]))
 
     state_dict = torch.load(best_state, map_location=device, weights_only=True)
     resNet34.load_state_dict(state_dict)
@@ -219,7 +230,7 @@ if __name__ == "__main__":
                 all_predictions.append(prediction)
                 all_targets.append(true_label)
 
-    topX = 20
+    topX = 10
     sorted_class_sizes = sorted(class_sizes.items(), key=lambda pair: pair[1],reverse=True)
     top_classes = sorted_class_sizes[:topX]
 
