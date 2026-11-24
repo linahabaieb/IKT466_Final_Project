@@ -14,7 +14,13 @@ from datetime import datetime
 import argparse
 from tqdm import tqdm
 from glob import glob
-from sklearn.metrics import precision_score, recall_score, accuracy_score
+from sklearn.metrics import precision_score, recall_score, accuracy_score, f1_score
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--train", action="store_true")
+parser.add_argument("--train_top_20", action="store_true")
+
+args = parser.parse_args()
 
 SCRIPT_PATH = os.path.abspath(os.path.dirname(__file__))
 data_dir = os.path.join(SCRIPT_PATH,"spectrograms")
@@ -23,28 +29,64 @@ dataset = datasets.ImageFolder(data_dir,transform=transforms.Compose([transforms
 
 class_sizes = Counter(dataset.targets)
 
-usable_classes = {
-    class_id for class_id, count in class_sizes.items() if count > 10
-}
+if args.train_top_20:
+    top_20_class_ids = {
+        class_id
+        for class_id, count in class_sizes.most_common(20)
+    }
+
+    usable_class_ids = sorted(top_20_class_ids)
+else:
+    usable_class_ids = sorted(
+        class_id for class_id, count in class_sizes.items() if count > 10
+    )
+
+old_to_new = {old_id: new_id for new_id, old_id in enumerate(usable_class_ids)}
+class_names = [dataset.classes[old_id] for old_id in usable_class_ids]
+num_classes = len(usable_class_ids)
 
 usable_indices = [
-    data_index for data_index, target in enumerate(dataset.targets) if target in usable_classes
+    index for index, target in enumerate(dataset.targets) if target in old_to_new
 ]
 
-filtered_labels = [dataset.targets[i] for i in usable_indices]
+mapped_labels = [old_to_new[dataset.targets[index]] for index in usable_indices]
 
-train_indexes, temp_indexes, train_labels, temp_labels = train_test_split(usable_indices, filtered_labels,train_size=0.7,random_state=42,stratify=filtered_labels)
-test_indexes, validate_indexes = train_test_split(temp_indexes,train_size=0.67,random_state=42,stratify=temp_labels)
+class RemappedSubset(Dataset):
+    def __init__(self, image_dataset, indices, label_map):
+        self.image_dataset = image_dataset
+        self.indices = indices
+        self.label_map = label_map
 
-train_data = Subset(dataset, train_indexes)
-test_data = Subset(dataset, test_indexes)
-validate_data = Subset(dataset, validate_indexes)
+    def __len__(self):
+        return len(self.indices)
 
-loaded_training_data = DataLoader(train_data,batch_size=64,shuffle=True)
-loaded_test_data = DataLoader(test_data,batch_size=64,shuffle=False)
-loaded_validation_data = DataLoader(validate_data,batch_size=64,shuffle=False)
+    def __getitem__(self, position):
+        original_index = self.indices[position]
+        image, old_label = self.image_dataset[original_index]
+        return image, self.label_map[old_label]
 
+train_indexes, temp_indexes, train_labels, temp_labels = train_test_split(
+    usable_indices,
+    mapped_labels,
+    train_size=0.7,
+    random_state=42,
+    stratify=mapped_labels,
+)
 
+test_indexes, validate_indexes = train_test_split(
+    temp_indexes,
+    train_size=0.67,
+    random_state=42,
+    stratify=temp_labels,
+)
+
+train_data = RemappedSubset(dataset, train_indexes, old_to_new)
+test_data = RemappedSubset(dataset, test_indexes, old_to_new)
+validate_data = RemappedSubset(dataset, validate_indexes, old_to_new)
+
+loaded_training_data = DataLoader(train_data, batch_size=64, shuffle=True)
+loaded_test_data = DataLoader(test_data, batch_size=64, shuffle=False)
+loaded_validation_data = DataLoader(validate_data, batch_size=64, shuffle=False)
 
 class Block(nn.Module):
     def __init__(self, in_channels, out_channels, identity_downsample = None, stride = 1):
@@ -133,18 +175,22 @@ class ResNet(nn.Module):
         features = self.forward_features(x)
         return self.fc(features)
 
-def train_epoch(batch_report=20):
+def train_epoch(model, data_loader, optimizer, loss_fn, device, batch_report=20):
+    model.train()
     total_loss = 0
     last_loss = 0
 
-    for index, data in enumerate(loaded_training_data):
+    if args.train_top_20 == True:
+        batch_report = 2
+
+    for index, data in enumerate(data_loader):
         inputs, labels = data
         inputs = inputs.to(device)
         labels = labels.to(device)
 
         optimizer.zero_grad()
 
-        outputs = resNet34(inputs)
+        outputs = model(inputs)
 
         loss = loss_fn(outputs,labels)
         loss.backward()
@@ -160,15 +206,11 @@ def train_epoch(batch_report=20):
 
 if __name__ == "__main__":
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--train", action="store_true")
-    
-    args = parser.parse_args()
+
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    resNet34 = ResNet(Block,[3,4,6,3],3,len(dataset.classes)).to(device)
+    resNet34 = ResNet(Block,[3,4,6,3],3,num_classes).to(device)
     print("Using:", device)
-    if args.train == True:
-        
+    if args.train == True or args.train_top_20 == True:
         loss_fn = torch.nn.CrossEntropyLoss()
         optimizer = torch.optim.SGD(resNet34.parameters(), lr=0.01, momentum=0.9)
 
@@ -176,31 +218,30 @@ if __name__ == "__main__":
 
         total_epochs = 5
 
-        best_loss = 1_000_000
+        best_loss = float('inf')
 
         for epoch in range(total_epochs):
             print(f"EPOCH: {current_epoch}")
 
             resNet34.train(True)
-            avg_loss = train_epoch()
+            avg_loss = train_epoch(resNet34,loaded_training_data,optimizer,loss_fn,device)
 
-
-            avg_validation_loss = 0
+            total_test_loss = 0
             resNet34.eval()
 
             with torch.no_grad():
-                for validation_inputs, validation_labels in loaded_validation_data:
-                    validation_inputs = validation_inputs.to(device)
-                    validation_labels = validation_labels.to(device)
+                for test_inputs, test_labels in loaded_test_data:
+                    test_inputs = test_inputs.to(device)
+                    test_labels = test_labels.to(device)
 
-                    validation_outputs = resNet34(validation_inputs)
-                    validation_loss = loss_fn(validation_outputs, validation_labels)
-                    total_validation_loss += validation_loss.item()
+                    test_outputs = resNet34(test_inputs)
+                    test_loss = loss_fn(test_outputs, test_labels)
+                    total_test_loss += test_loss.item()
 
-            avg_validation_loss = total_validation_loss / len(loaded_validation_data)
+            avg_test_loss = total_test_loss / len(loaded_test_data)
 
-            if avg_validation_loss < best_loss:
-                best_loss = avg_validation_loss
+            if avg_test_loss < best_loss:
+                best_loss = avg_test_loss
                 model_path = f"model34_{timestamp}_{current_epoch}"
                 torch.save(resNet34.state_dict(), model_path)
 
@@ -217,8 +258,8 @@ if __name__ == "__main__":
     tied_for_latest_time = [state_file for state_file in tied_for_latest_day if int(os.path.basename(state_file).split("_")[-2]) == int(os.path.basename(latest_time).split("_")[-2])]
     best_state = max(tied_for_latest_time, key=lambda path: int(os.path.basename(path).split("_")[-1]))
 
+    #best_state = "model34_20261124_105946_4"
     print(best_state)
-    best_state = "model34_20261124_105946_4"
     state_dict = torch.load(best_state, map_location=device, weights_only=True)
     resNet34.load_state_dict(state_dict)
     resNet34.eval()
@@ -234,77 +275,39 @@ if __name__ == "__main__":
                 all_predictions.append(prediction)
                 all_targets.append(true_label)
 
-    topX = 20
-    sorted_class_sizes = sorted(class_sizes.items(), key=lambda pair: pair[1],reverse=True)
-    top_classes = sorted_class_sizes[:topX]
+    y_true = torch.stack(all_targets).numpy()
+    y_pred = torch.stack(all_predictions).numpy()
+    labels = list(range(num_classes))
 
-    top_class_ids = {label for label, _ in top_classes}
-    top_classses_predicitons = [(pred.item(),target.item()) for pred, target in zip(all_predictions,all_targets) if target.item() in top_class_ids]
+    print("Validation accuracy:", accuracy_score(y_true, y_pred))
 
-    sortet_predictions = [t[0] for t in top_classses_predicitons]
-    sortet_targets = [t[1] for t in top_classses_predicitons]
-    sk_accuracy = accuracy_score(sortet_targets, sortet_predictions)
-    sk_precision = precision_score(sortet_targets, sortet_predictions,average="macro", zero_division=0)
-    sk_recall = recall_score(sortet_targets, sortet_predictions,average="macro", zero_division=0)
-    print(f"Top Overall sk_accuracy:{sk_accuracy}")
-    print(f"Top Overall sk_precision: {sk_precision}")
-    print(f"Top Overall sk_recall: {sk_recall}")
+    top_20_classes_og_ids = {
+        class_id for class_id, count in class_sizes.most_common(20)
+    }
 
-    per_class_predictions = {}
-    per_class_scores = {}
-    for int_label in dataset.class_to_idx.values():
-        class_results = [t for t in top_classses_predicitons if  int(int_label) == int(t[1])]
-        if len(class_results) == 0:
-            continue
-        classs_predictions = [t[0] for t in class_results]
-        class_targets = [t[1] for t in class_results]
-        per_class_predictions[int_label] = [classs_predictions,class_targets]
-        class_acc = accuracy_score(class_targets, classs_predictions)
-        class_prec = precision_score(class_targets, classs_predictions,average="macro", zero_division=0)
-        class_rec = recall_score(class_targets, classs_predictions,average="macro", zero_division=0)
-        per_class_scores[int_label] = (class_acc,class_prec,class_rec)
+    top_20_classes_new_ids = {
+        old_to_new[old_id] for old_id in top_20_classes_og_ids if old_id in old_to_new
+    }
 
-    print(f"| Class | Accuracy | Precision | Recall |")
-    for key, value in per_class_scores.items():
-        print(f"|{key}|{round(value[0],2)}|{round(value[1],2)}|{round(value[2],2)}|")
+    mask = np.isin(y_true,list(top_20_classes_new_ids))
 
-    print(f"Top {topX} classes: {top_classes}")
+    if mask.any():
+        print("Top 20 Validation accuracy:", accuracy_score(y_true[mask], y_pred[mask]))
+    else:
+        print("No class in the top 20 was in the validation examples. R.I.P")
 
+    print(
+        "Validation macro-F1:",
+        f1_score(y_true, y_pred, labels=labels, average="macro", zero_division=0),
+    )
+    print(
+        "Validation macro-recall:",
+        recall_score(y_true, y_pred, labels=labels, average="macro", zero_division=0),
+    )
 
-    ##########################################################################
+    per_class_recall = recall_score(
+        y_true, y_pred, labels=labels, average=None, zero_division=0
+    )
 
-
-    label_counter = dataset.class_to_idx
-    counter_per_label = {int_label:Counter() for int_label in label_counter.values()}
-
-    with torch.no_grad():
-        for i in tqdm(range(min(2000, len(validate_data)))):
-            image, true_label = validate_data[i]
-            with torch.no_grad():
-                image = image.unsqueeze(0).to(device)
-                logits = resNet34(image)
-                predicted_id = logits.argmax(dim=1).item()
-
-            prediction_bool = predicted_id == true_label
-
-            counter_per_label[true_label][prediction_bool] += 1
-
-    eval_subset_targets = [validate_data[i][1] for i in range(len(validate_data))]
-    eval_class_sizes = Counter(eval_subset_targets)
-
-    accuracy_per_label = []
-    accuracy_sum = 0
-    for label, counter in counter_per_label.items():
-        total = counter[True] + counter[False]
-        accuracy = counter[True] / total if total else 0.0
-        accuracy_per_label.append((label,accuracy,class_sizes[label]))
-        accuracy_sum += accuracy
-    accuracy_avg = accuracy_sum/len(counter_per_label)
-    print(f"Accuracy Per Class: {accuracy_per_label}")
-
-
-
-
-
-
-    
+    for class_id, recall in enumerate(per_class_recall):
+        print(f"ID:{class_id} {class_names[class_id]} recall: {recall:.3f}")
