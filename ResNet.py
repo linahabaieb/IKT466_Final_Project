@@ -204,7 +204,7 @@ if __name__ == "__main__":
 
             current_epoch += 1
 
-    matches = glob(f"model34_*_4")
+    matches = glob(f"model34_*")
 
     if not matches:
         raise FileNotFoundError(f"No checkpoints found for {timestamp}")
@@ -212,9 +212,11 @@ if __name__ == "__main__":
     latest_day = max(matches, key=lambda path: int(os.path.basename(path).split("_")[-3]))
     tied_for_latest_day = [state_file for state_file in matches if int(os.path.basename(state_file).split("_")[-3]) == int(os.path.basename(latest_day).split("_")[-3])]
     latest_time = max(tied_for_latest_day, key=lambda path: int(os.path.basename(path).split("_")[-2]))
-    tied_for_latest_time = [state_file for state_file in tied_for_latest_day if int(os.path.basename(state_file).split("_")[-3]) == int(os.path.basename(latest_time).split("_")[-3])]
+    tied_for_latest_time = [state_file for state_file in tied_for_latest_day if int(os.path.basename(state_file).split("_")[-2]) == int(os.path.basename(latest_time).split("_")[-2])]
     best_state = max(tied_for_latest_time, key=lambda path: int(os.path.basename(path).split("_")[-1]))
 
+    print(best_state)
+    best_state = "model34_20261124_105946_4"
     state_dict = torch.load(best_state, map_location=device, weights_only=True)
     resNet34.load_state_dict(state_dict)
     resNet34.eval()
@@ -230,7 +232,7 @@ if __name__ == "__main__":
                 all_predictions.append(prediction)
                 all_targets.append(true_label)
 
-    topX = 10
+    topX = 20
     sorted_class_sizes = sorted(class_sizes.items(), key=lambda pair: pair[1],reverse=True)
     top_classes = sorted_class_sizes[:topX]
 
