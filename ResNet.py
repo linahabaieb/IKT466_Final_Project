@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
-from torch.utils.data import DataLoader, Subset
+from torch.utils.data import DataLoader, Subset, Dataset
 import torchvision
 from  torchvision import transforms, datasets
 import matplotlib.pyplot as plt
@@ -41,8 +41,8 @@ test_data = Subset(dataset, test_indexes)
 validate_data = Subset(dataset, validate_indexes)
 
 loaded_training_data = DataLoader(train_data,batch_size=64,shuffle=True)
-loaded_test_data = DataLoader(test_data,batch_size=64,shuffle=True)
-loaded_validation_data = DataLoader(validate_data,batch_size=64,shuffle=True)
+loaded_test_data = DataLoader(test_data,batch_size=64,shuffle=False)
+loaded_validation_data = DataLoader(validate_data,batch_size=64,shuffle=False)
 
 
 
@@ -112,12 +112,14 @@ class ResNet(nn.Module):
 
         return nn.Sequential(*layers)
 
-    def forward(self,x):
+    def forward_features(self, x):
         identity = self.input_shortcut(x)
+
         x = self.conv1(x)
         x = self.batch_norm_layer1(x)
         x = self.relu(x)
         x = self.max_pool(x)
+
         x = self.layer1(x)
         x = self.layer2(x)
         x = self.layer3(x)
@@ -125,10 +127,11 @@ class ResNet(nn.Module):
         x = x + identity
 
         x = self.avg_pool(x)
-        x = torch.flatten(x, 1)
-        x = self.fc(x)
+        return torch.flatten(x, 1)  # shape: [batch_size, 512]
 
-        return x
+    def forward(self,x):
+        features = self.forward_features(x)
+        return self.fc(features)
 
 def train_epoch(batch_report=20):
     total_loss = 0
@@ -182,23 +185,22 @@ if __name__ == "__main__":
             avg_loss = train_epoch()
 
 
-            total_test_loss = 0
+            avg_validation_loss = 0
             resNet34.eval()
 
             with torch.no_grad():
-                for test_index, test_data in enumerate(loaded_test_data):
-                    test_inputs, test_labels = test_data
-                    test_inputs = test_inputs.to(device)
-                    test_labels = test_labels.to(device)
-                    test_outputs = resNet34(test_inputs)
-                    test_loss = loss_fn(test_outputs,test_labels)
+                for validation_inputs, validation_labels in loaded_validation_data:
+                    validation_inputs = validation_inputs.to(device)
+                    validation_labels = validation_labels.to(device)
 
-                    total_test_loss += test_loss.item()
+                    validation_outputs = resNet34(validation_inputs)
+                    validation_loss = loss_fn(validation_outputs, validation_labels)
+                    total_validation_loss += validation_loss.item()
 
-            avg_test_loss = total_test_loss/(len(loaded_test_data)+1)
+            avg_validation_loss = total_validation_loss / len(loaded_validation_data)
 
-            if avg_test_loss < best_loss:
-                best_loss = avg_test_loss
+            if avg_validation_loss < best_loss:
+                best_loss = avg_validation_loss
                 model_path = f"model34_{timestamp}_{current_epoch}"
                 torch.save(resNet34.state_dict(), model_path)
 

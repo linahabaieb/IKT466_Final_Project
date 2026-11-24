@@ -4,14 +4,13 @@ from ResNet import Block, ResNet, dataset, train_data, validate_data
 from SVM import get_features, train_svm, report_metrics, select_top_20
 
 # Loading the trained ResNet
-checkpoint = Path(__file__).with_name("model34_20261120_113410_4")
+checkpoint = Path(__file__).with_name("model34_20261124_105946_4")
 resnet = ResNet(Block, [3, 4, 6, 3], 3, len(dataset.classes))
 weights = torch.load(checkpoint, map_location="cpu", weights_only=True)
 resnet.load_state_dict(weights)
 resnet.eval()
 
-# Returning the 512 features that normally go into the final classifier.
-resnet.fc = torch.nn.Identity()
+
 
 feature_folder = checkpoint.parent / "features"
 feature_folder.mkdir(exist_ok=True)

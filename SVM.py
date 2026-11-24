@@ -9,14 +9,17 @@ def get_features(model, data):
 
     with torch.no_grad():
         for images, species in DataLoader(data, batch_size=32):
-            features.append(model(images))
-            labels.append(species)
+            features.append(model(images).cpu())
+            labels.append(species.cpu())
 
     return torch.cat(features), torch.cat(labels)
 
 def train_svm(X_train, y_train, num_classes):
+    seed = 42
+    torch.manual_seed(seed)
+    generator = torch.Generator().manual_seed(seed)
     train_data = TensorDataset(X_train, y_train)
-    loader = DataLoader(train_data, batch_size=64, shuffle=True)
+    loader = DataLoader(train_data, batch_size=64, shuffle=True, generator=generator)
 
     svm = nn.Linear(X_train.shape[1], num_classes)
     #Creates the rule for measuring prediction errors during training
