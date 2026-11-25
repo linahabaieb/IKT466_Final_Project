@@ -208,7 +208,7 @@ if __name__ == "__main__":
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    resNet34 = ResNet(Block,[3,4,6,3],3,num_classes).to(device)
+    resNet34 = ResNet(Block, [3,4,6,3], 3, num_classes).to(device)
     print("Using:", device)
     if args.train == True or args.train_top_20 == True:
         loss_fn = torch.nn.CrossEntropyLoss()
