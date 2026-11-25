@@ -65,7 +65,6 @@ def report_metrics(y_true, predictions, class_names):
         recall_scores.append(recall)
         f1_scores.append(f1)
 
-    macro_f1 = sum(f1_scores) / len(f1_scores)
     print(f"SVM accuracy:  {accuracy:.1%}")
     print(f"SVM precision: {sum(precision_scores) / len(precision_scores):.1%}")
     print(f"SVM recall:    {sum(recall_scores) / len(recall_scores):.1%}")
