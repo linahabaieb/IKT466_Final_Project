@@ -183,7 +183,7 @@ def train_epoch(model, data_loader, optimizer, loss_fn, device, batch_report=20)
     total_loss = 0
     last_loss = 0
 
-    if args.train_top_20 == True:
+    if args.top_20 == True:
         batch_report = 2
 
     for index, data in enumerate(data_loader):
@@ -235,7 +235,7 @@ if __name__ == "__main__":
 
         current_epoch = 0
 
-        total_epochs = 5
+        total_epochs = 20
 
         best_loss = float('inf')
 
@@ -278,7 +278,7 @@ if __name__ == "__main__":
     tied_for_latest_time = [state_file for state_file in tied_for_latest_day if int(os.path.basename(state_file).split("_")[-2]) == int(os.path.basename(latest_time).split("_")[-2])]
     best_state = max(tied_for_latest_time, key=lambda path: int(os.path.basename(path).split("_")[-1]))
 
-    #best_state = "model34_20261124_105946_4"
+    #best_state = "model34_20261126_123325_4" # Best state for top 20 training
     print(best_state)
     state_dict = torch.load(best_state, map_location=device, weights_only=True)
     resNet34.load_state_dict(state_dict)
@@ -339,33 +339,44 @@ if __name__ == "__main__":
     resNet34.eval()
 
     target_layers = [resNet34.layer4[-1].conv_layer2]
-    image, true_label = validate_data[24]
+    image, true_label = validate_data[56]
     input_tensor = image.unsqueeze(0).to(device)
 
+    prediction = resNet34(input_tensor).argmax(dim=1).item()
     target = int(true_label)
 
     with GradCAM(resNet34,target_layers) as cam:
+        predictions = [ClassifierOutputTarget(prediction)]
         targets = [ClassifierOutputTarget(target)]
 
-        grayscale_cam = cam(input_tensor,targets)
-        grayscale_cam = grayscale_cam[0, :]
+        grayscale_cam_pred = cam(input_tensor,predictions)
+        grayscale_cam_pred = grayscale_cam_pred[0, :]
+
+        grayscale_cam_tar = cam(input_tensor,targets)
+        grayscale_cam_tar = grayscale_cam_tar[0, :]
 
     rgb_image = image.permute(1, 2, 0).cpu().numpy()
     rgb_image = np.clip(rgb_image, 0, 1)
     
-    visualization = show_cam_on_image(rgb_image, grayscale_cam, use_rgb=True)
+    visualization_tar = show_cam_on_image(rgb_image, grayscale_cam_tar, use_rgb=True)
+    visualization_pred = show_cam_on_image(rgb_image, grayscale_cam_pred, use_rgb=True)
 
-    plt.figure(figsize=(10, 4))
-    plt.subplot(1, 2, 1)
+    plt.figure(figsize=(15, 4))
+    plt.subplot(1, 3, 1)
     plt.imshow(rgb_image)
     plt.title(f"Input — {class_names[target]}")
     plt.axis("off")
 
-    plt.subplot(1, 2, 2)
-    plt.imshow(visualization)
-    plt.title("Grad-CAM")
+    plt.subplot(1, 3, 2)
+    plt.imshow(visualization_tar)
+    plt.title(f"Grad-CAM target: {class_names[target]}")
+    plt.axis("off")
+    plt.tight_layout()
+
+    plt.subplot(1, 3, 3)
+    plt.imshow(visualization_pred)
+    plt.title(f"Grad-CAM prediction: {class_names[prediction]}")
     plt.axis("off")
     plt.tight_layout()
     plt.show()
-
 

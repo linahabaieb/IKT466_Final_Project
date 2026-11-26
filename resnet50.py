@@ -96,11 +96,11 @@ class Block(nn.Module):
     def __init__(self, in_channels, out_channels, identity_downsample = None, stride = 1):
         super(Block,self).__init__()
         self.expansion = 4
-        self.conv_layer1 = nn.Conv2d(in_channels,out_channels,kernel_size=3,stride=stride,padding=1)
+        self.conv_layer1 = nn.Conv2d(in_channels,out_channels,kernel_size=1,stride=1,padding=0)
         self.batch_norm_layer1 = nn.BatchNorm2d(out_channels)
-        self.conv_layer2 = nn.Conv2d(out_channels,out_channels,kernel_size=3,stride=1,padding=1)
+        self.conv_layer2 = nn.Conv2d(out_channels,out_channels,kernel_size=3,stride=stride,padding=1)
         self.batch_norm_layer2 = nn.BatchNorm2d(out_channels)
-        self.conv_layer3 = nn.Conv2d(out_channels,out_channels*self.expansion,kernel_size=3,stride=1,padding=1)
+        self.conv_layer3 = nn.Conv2d(out_channels,out_channels*self.expansion,kernel_size=1,stride=1,padding=0)
         self.batch_norm_layer3 = nn.BatchNorm2d(out_channels*self.expansion)
         self.relu = nn.ReLU()
         self.identity_downsample = identity_downsample
@@ -139,6 +139,13 @@ class ResNet(nn.Module):
         self.layer3 = self._make_layer(block,layers[2],256,2)
         self.layer4 = self._make_layer(block,layers[3],512,2)
 
+        final_channels = 512*self.expansion
+
+        self.input_shortcut = nn.Sequential(
+            nn.Conv2d(image_channels, final_channels, kernel_size=1, stride=32, padding=0, bias=False),
+            nn.BatchNorm2d(final_channels),
+        )
+
         self.avg_pool = nn.AdaptiveAvgPool2d((1,1))
         self.fc = nn.Linear(512*self.expansion, num_classes)
 
@@ -158,6 +165,7 @@ class ResNet(nn.Module):
         return nn.Sequential(*layers)
 
     def forward_features(self, x):
+        identity = self.input_shortcut(x)
 
         x = self.conv1(x)
         x = self.batch_norm_layer1(x)
@@ -168,6 +176,8 @@ class ResNet(nn.Module):
         x = self.layer2(x)
         x = self.layer3(x)
         x = self.layer4(x)
+
+        x = x + identity 
 
         x = self.avg_pool(x)
         return torch.flatten(x, 1)
@@ -211,11 +221,11 @@ def train_epoch(model, data_loader, optimizer, loss_fn, device, batch_report=20)
 
 def train(model, time_stamp, train_dataloader, test_dataloader, device, loss_function):
     loss_fn = loss_function
-    optimizer = torch.optim.SGD(model.parameters(), lr=0.01, momentum=0.9)
+    optimizer = torch.optim.SGD(model.parameters(), lr=0.001, momentum=0.9)
 
     current_epoch = 0
 
-    total_epochs = 5
+    total_epochs = 20
 
     best_loss = float('inf')
 
@@ -283,7 +293,8 @@ if __name__ == "__main__":
     tied_for_latest_time = [state_file for state_file in tied_for_latest_day if int(os.path.basename(state_file).split("_")[-2]) == int(os.path.basename(latest_time).split("_")[-2])]
     best_state = max(tied_for_latest_time, key=lambda path: int(os.path.basename(path).split("_")[-1]))
 
-    #best_state = "model34_20261124_105946_4"
+    #best_state = 
+    # model50_20261126_145500_18
     print(best_state)
     state_dict = torch.load(best_state, map_location=device, weights_only=True)
     net50.load_state_dict(state_dict)
@@ -305,8 +316,6 @@ if __name__ == "__main__":
     y_pred = torch.stack(all_predictions).numpy()
     labels = list(range(num_classes))
 
-    print("Validation accuracy:", accuracy_score(y_true, y_pred))
-
     top_20_classes_og_ids = {
         class_id for class_id, count in class_sizes.most_common(20)
     }
@@ -316,14 +325,16 @@ if __name__ == "__main__":
     }
 
     mask = np.isin(y_true,list(top_20_classes_new_ids))
-
+    
     if mask.any():
+        print("=============================")
         print("Top 20 Validation accuracy:", accuracy_score(y_true[mask], y_pred[mask]))
         print("Top 20 Validation F1:", f1_score(y_true[mask], y_pred[mask], average="macro", labels=labels, zero_division=0))
         print("Top 20 Validation Recall:", recall_score(y_true[mask], y_pred[mask], average="macro",labels=labels, zero_division=0))
     else:
         print("No class in the top 20 was in the validation examples. R.I.P")
-
+    print("=============================")
+    print("Validation accuracy:", accuracy_score(y_true, y_pred))
     print(
         "Validation macro-F1:",
         f1_score(y_true, y_pred, labels=labels, average="macro", zero_division=0),
@@ -332,7 +343,7 @@ if __name__ == "__main__":
         "Validation macro-recall:",
         recall_score(y_true, y_pred, labels=labels, average="macro", zero_division=0),
     )
-
+    print("=============================")
     per_class_recall = recall_score(
         y_true, y_pred, labels=labels, average=None, zero_division=0
     )
@@ -344,31 +355,44 @@ if __name__ == "__main__":
     net50.eval()
 
     target_layers = [net50.layer4[-1].conv_layer2]
-    image, true_label = validate_data[24]
+    image, true_label = validate_data[56]
     input_tensor = image.unsqueeze(0).to(device)
 
+    prediction = net50(input_tensor).argmax(dim=1).item()
     target = int(true_label)
 
     with GradCAM(net50,target_layers) as cam:
+        predictions = [ClassifierOutputTarget(prediction)]
         targets = [ClassifierOutputTarget(target)]
 
-        grayscale_cam = cam(input_tensor,targets)
-        grayscale_cam = grayscale_cam[0, :]
+        grayscale_cam_pred = cam(input_tensor,predictions)
+        grayscale_cam_pred = grayscale_cam_pred[0, :]
+
+        grayscale_cam_tar = cam(input_tensor,targets)
+        grayscale_cam_tar = grayscale_cam_tar[0, :]
 
     rgb_image = image.permute(1, 2, 0).cpu().numpy()
     rgb_image = np.clip(rgb_image, 0, 1)
     
-    visualization = show_cam_on_image(rgb_image, grayscale_cam, use_rgb=True)
+    visualization_tar = show_cam_on_image(rgb_image, grayscale_cam_tar, use_rgb=True)
+    visualization_pred = show_cam_on_image(rgb_image, grayscale_cam_pred, use_rgb=True)
 
-    plt.figure(figsize=(10, 4))
-    plt.subplot(1, 2, 1)
+
+    plt.figure(figsize=(15, 4))
+    plt.subplot(1, 3, 1)
     plt.imshow(rgb_image)
     plt.title(f"Input — {class_names[target]}")
     plt.axis("off")
 
-    plt.subplot(1, 2, 2)
-    plt.imshow(visualization)
-    plt.title("Grad-CAM")
+    plt.subplot(1, 3, 2)
+    plt.imshow(visualization_tar)
+    plt.title(f"Grad-CAM target: {target}")
+    plt.axis("off")
+    plt.tight_layout()
+
+    plt.subplot(1, 3, 3)
+    plt.imshow(visualization_pred)
+    plt.title(f"Grad-CAM prediction {prediction}")
     plt.axis("off")
     plt.tight_layout()
     plt.show()
