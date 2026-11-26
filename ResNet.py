@@ -15,10 +15,13 @@ import argparse
 from tqdm import tqdm
 from glob import glob
 from sklearn.metrics import precision_score, recall_score, accuracy_score, f1_score
+from pytorch_grad_cam import GradCAM
+from pytorch_grad_cam.utils.model_targets import ClassifierOutputTarget
+from pytorch_grad_cam.utils.image import show_cam_on_image
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--train", action="store_true")
-parser.add_argument("--train_top_20", action="store_true")
+parser.add_argument("--top_20", action="store_true")
 
 args = parser.parse_args()
 
@@ -29,7 +32,7 @@ dataset = datasets.ImageFolder(data_dir,transform=transforms.Compose([transforms
 
 class_sizes = Counter(dataset.targets)
 
-if args.train_top_20:
+if args.top_20:
     top_20_class_ids = {
         class_id
         for class_id, count in class_sizes.most_common(20)
@@ -132,7 +135,7 @@ class ResNet(nn.Module):
         final_channels = 512
 
         self.input_shortcut = nn.Sequential(
-            nn.Conv2d(image_channels, final_channels, kernel_size=1, stride=32, bias=False),
+            nn.Conv2d(image_channels, final_channels, kernel_size=33, stride=32, padding=16, bias=False),
             nn.BatchNorm2d(final_channels),
         )
 
@@ -207,10 +210,26 @@ def train_epoch(model, data_loader, optimizer, loss_fn, device, batch_report=20)
 if __name__ == "__main__":
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
 
+    # SELECT DEVICE
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    resNet34 = ResNet(Block, [3,4,6,3], 3, num_classes).to(device)
     print("Using:", device)
-    if args.train == True or args.train_top_20 == True:
+
+    # MODEL
+    resNet34 = ResNet(Block,[3,4,6,3],3,num_classes).to(device)
+
+    # TRAINING
+    if args.train == True:
+        train_label_counts = torch.bincount(
+            torch.tensor(train_labels, dtype=torch.long),
+            minlength=num_classes,
+        ).float()
+
+        class_weights = (
+            train_label_counts.sum()
+            / (num_classes * train_label_counts.clamp_min(1))
+        ).to(device)
+
+        loss_fn = nn.CrossEntropyLoss(weight=class_weights)
         loss_fn = torch.nn.CrossEntropyLoss()
         optimizer = torch.optim.SGD(resNet34.parameters(), lr=0.01, momentum=0.9)
 
@@ -247,6 +266,7 @@ if __name__ == "__main__":
 
             current_epoch += 1
 
+    # LOADING STATE
     matches = glob(f"model34_*")
 
     if not matches:
@@ -264,6 +284,7 @@ if __name__ == "__main__":
     resNet34.load_state_dict(state_dict)
     resNet34.eval()
 
+    # SCORING 
     all_predictions = []
     all_targets = []
     with torch.no_grad():
@@ -293,6 +314,8 @@ if __name__ == "__main__":
 
     if mask.any():
         print("Top 20 Validation accuracy:", accuracy_score(y_true[mask], y_pred[mask]))
+        print("Top 20 Validation F1:", f1_score(y_true[mask], y_pred[mask], average="macro", labels=labels, zero_division=0))
+        print("Top 20 Validation Recall:", recall_score(y_true[mask], y_pred[mask], average="macro",labels=labels, zero_division=0))
     else:
         print("No class in the top 20 was in the validation examples. R.I.P")
 
@@ -311,3 +334,38 @@ if __name__ == "__main__":
 
     for class_id, recall in enumerate(per_class_recall):
         print(f"ID:{class_id} {class_names[class_id]} recall: {recall:.3f}")
+
+    # GRAD CAM
+    resNet34.eval()
+
+    target_layers = [resNet34.layer4[-1].conv_layer2]
+    image, true_label = validate_data[24]
+    input_tensor = image.unsqueeze(0).to(device)
+
+    target = int(true_label)
+
+    with GradCAM(resNet34,target_layers) as cam:
+        targets = [ClassifierOutputTarget(target)]
+
+        grayscale_cam = cam(input_tensor,targets)
+        grayscale_cam = grayscale_cam[0, :]
+
+    rgb_image = image.permute(1, 2, 0).cpu().numpy()
+    rgb_image = np.clip(rgb_image, 0, 1)
+    
+    visualization = show_cam_on_image(rgb_image, grayscale_cam, use_rgb=True)
+
+    plt.figure(figsize=(10, 4))
+    plt.subplot(1, 2, 1)
+    plt.imshow(rgb_image)
+    plt.title(f"Input — {class_names[target]}")
+    plt.axis("off")
+
+    plt.subplot(1, 2, 2)
+    plt.imshow(visualization)
+    plt.title("Grad-CAM")
+    plt.axis("off")
+    plt.tight_layout()
+    plt.show()
+
+
