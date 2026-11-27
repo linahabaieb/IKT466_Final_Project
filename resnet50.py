@@ -14,16 +14,22 @@ from datetime import datetime
 import argparse
 from tqdm import tqdm
 from glob import glob
-from sklearn.metrics import precision_score, recall_score, accuracy_score, f1_score
+from sklearn.metrics import precision_score, recall_score, accuracy_score, f1_score, confusion_matrix, ConfusionMatrixDisplay
 from pytorch_grad_cam import GradCAM
 from pytorch_grad_cam.utils.model_targets import ClassifierOutputTarget
 from pytorch_grad_cam.utils.image import show_cam_on_image
 
 parser = argparse.ArgumentParser()
-parser.add_argument("--train", action="store_true")
-parser.add_argument("--top_20", action="store_true")
+parser.add_argument("--train", action="store_true", default=False)
+parser.add_argument("--top_20", action="store_true", default=False)
+parser.add_argument("--weighted", action="store_true", default=False)
+parser.add_argument("--skip", action="store_true", default=False)
 
 args = parser.parse_args()
+
+top_20 = "_top20" if args.top_20 else "_NA"
+weighted = "_weighted" if args.weighted else "_NA"
+skip = "_skip" if args.skip else "_NA"
 
 SCRIPT_PATH = os.path.abspath(os.path.dirname(__file__))
 data_dir = os.path.join(SCRIPT_PATH,"spectrograms")
@@ -177,7 +183,8 @@ class ResNet(nn.Module):
         x = self.layer3(x)
         x = self.layer4(x)
 
-        x = x + identity 
+        if args.skip:
+            x = x + identity 
 
         x = self.avg_pool(x)
         return torch.flatten(x, 1)
@@ -219,17 +226,19 @@ def train_epoch(model, data_loader, optimizer, loss_fn, device, batch_report=20)
             total_loss = 0.
     return last_loss
 
-def train(model, time_stamp, train_dataloader, test_dataloader, device, loss_function):
+def train(model, time_stamp, train_dataloader, test_dataloader, device, loss_function, learning_rate):
+    loss_timestamp = []
+    loss_over_time = []
     loss_fn = loss_function
-    optimizer = torch.optim.SGD(model.parameters(), lr=0.001, momentum=0.9)
+    optimizer = torch.optim.SGD(model.parameters(), lr=learning_rate, momentum=0.9)
 
     current_epoch = 0
 
-    total_epochs = 20
+    total_epochs = 5
 
     best_loss = float('inf')
 
-    for _ in range(total_epochs):
+    for epoch in range(total_epochs):
         print(f"EPOCH: {current_epoch}")
 
         model.train(True)
@@ -248,13 +257,15 @@ def train(model, time_stamp, train_dataloader, test_dataloader, device, loss_fun
                 total_test_loss += test_loss.item()
 
         avg_test_loss = total_test_loss / len(test_dataloader)
-
+        loss_over_time.append(avg_test_loss)
+        loss_timestamp.append(epoch)
         if avg_test_loss < best_loss:
             best_loss = avg_test_loss
-            model_path = f"model50_{time_stamp}_{current_epoch}"
+            model_path = f"model50_{time_stamp}_{current_epoch}{top_20}{skip}{weighted}_{best_loss}"
             torch.save(model.state_dict(), model_path)
 
         current_epoch += 1
+    return loss_over_time, loss_timestamp
 
 if __name__ == "__main__":
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
@@ -265,6 +276,7 @@ if __name__ == "__main__":
 
     # MODEL
     net50 = ResNet50(num_classes).to(device)
+    learning_rate = 0.001
 
     # TRAINING
     if args.train == True:
@@ -276,10 +288,10 @@ if __name__ == "__main__":
         class_weights = (
             train_label_counts.sum()
             / (num_classes * train_label_counts.clamp_min(1))
-        ).to(device)
+        ).to(device) if  args.weighted else None
         
-        loss_fn = nn.CrossEntropyLoss(weight=None)
-        train(net50,timestamp, loaded_training_data, loaded_test_data, device, loss_fn)
+        loss_fn = nn.CrossEntropyLoss(weight=class_weights)
+        loss_over_time, loss_timestamp = train(net50,timestamp, loaded_training_data, loaded_test_data, device, loss_fn,learning_rate)
 
     # LOADING STATE
     matches = glob(f"model50_*")
@@ -287,14 +299,12 @@ if __name__ == "__main__":
     if not matches:
         raise FileNotFoundError(f"No checkpoints found for {timestamp}")
 
-    latest_day = max(matches, key=lambda path: int(os.path.basename(path).split("_")[-3]))
-    tied_for_latest_day = [state_file for state_file in matches if int(os.path.basename(state_file).split("_")[-3]) == int(os.path.basename(latest_day).split("_")[-3])]
-    latest_time = max(tied_for_latest_day, key=lambda path: int(os.path.basename(path).split("_")[-2]))
-    tied_for_latest_time = [state_file for state_file in tied_for_latest_day if int(os.path.basename(state_file).split("_")[-2]) == int(os.path.basename(latest_time).split("_")[-2])]
-    best_state = max(tied_for_latest_time, key=lambda path: int(os.path.basename(path).split("_")[-1]))
+    latest_day = max(matches, key=lambda path: int(os.path.basename(path).split("_")[-7]))
+    tied_for_latest_day = [state_file for state_file in matches if int(os.path.basename(state_file).split("_")[-7]) == int(os.path.basename(latest_day).split("_")[-7])]
+    latest_time = max(tied_for_latest_day, key=lambda path: int(os.path.basename(path).split("_")[-6]))
+    tied_for_latest_time = [state_file for state_file in tied_for_latest_day if int(os.path.basename(state_file).split("_")[-6]) == int(os.path.basename(latest_time).split("_")[-6])]
+    best_state = max(tied_for_latest_time, key=lambda path: int(os.path.basename(path).split("_")[-5]))
 
-    #best_state = 
-    # model50_20261126_145500_18
     print(best_state)
     state_dict = torch.load(best_state, map_location=device, weights_only=True)
     net50.load_state_dict(state_dict)
@@ -323,14 +333,18 @@ if __name__ == "__main__":
     top_20_classes_new_ids = {
         old_to_new[old_id] for old_id in top_20_classes_og_ids if old_id in old_to_new
     }
-
-    mask = np.isin(y_true,list(top_20_classes_new_ids))
     
+    mask = np.isin(y_true,list(top_20_classes_new_ids))
+    y_true_masked = y_true[mask]
+    y_pred_masked =  y_pred[mask]
+    top_20_labels = sorted(y_true_masked)
+    class_names_mask = np.isin(np.array(len(class_names)),y_true_masked)
+
     if mask.any():
         print("=============================")
-        print("Top 20 Validation accuracy:", accuracy_score(y_true[mask], y_pred[mask]))
-        print("Top 20 Validation F1:", f1_score(y_true[mask], y_pred[mask], average="macro", labels=labels, zero_division=0))
-        print("Top 20 Validation Recall:", recall_score(y_true[mask], y_pred[mask], average="macro",labels=labels, zero_division=0))
+        print("Top 20 Validation accuracy:", accuracy_score(y_true_masked, y_pred_masked))
+        print("Top 20 Validation F1:", f1_score(y_true_masked, y_pred_masked, average="macro", labels=top_20_labels, zero_division=0))
+        print("Top 20 Validation Recall:", recall_score(y_true_masked, y_pred_masked, average="macro",labels=top_20_labels, zero_division=0))
     else:
         print("No class in the top 20 was in the validation examples. R.I.P")
     print("=============================")
@@ -395,4 +409,39 @@ if __name__ == "__main__":
     plt.title(f"Grad-CAM prediction {prediction}")
     plt.axis("off")
     plt.tight_layout()
+    plt.savefig(f"grad_cam_net50{top_20}{skip}{weighted}.png", dpi=300, bbox_inches="tight")
+    plt.show()
+
+    cm = confusion_matrix(
+        y_true_masked,
+        y_pred_masked,
+        labels=list(set(y_true_masked)),
+        normalize="true",
+    )
+    num_top_20_label = len(set(y_true_masked))
+    fig, ax = plt.subplots(figsize=(max(10, num_top_20_label * 0.6), max(8, num_top_20_label * 0.5)))
+
+    top_20_class_names = np.array(len(class_names))[class_names_mask]
+    disp = ConfusionMatrixDisplay(
+        confusion_matrix=cm,
+        display_labels=top_20_class_names,
+    )
+    disp.plot(
+        ax=ax,
+        cmap="Blues",
+        values_format=".2f",
+        xticks_rotation="vertical",
+        colorbar=True,
+    )
+    ax.set_title("ResNet 50 confusion matrix")
+    plt.savefig(f"top_20_matrix_net50{top_20}{skip}{weighted}.png", dpi=300, bbox_inches="tight")
+    fig.tight_layout()
+    plt.show()
+
+    loss_fig, loss_ax = plt.subplots(figsize=(6,3))
+    loss_ax.plot(loss_timestamp,loss_over_time)
+    loss_ax.set_title(f"Test loss over time with lr={learning_rate}")
+    loss_ax.set_xlabel("Epoch")
+    loss_ax.set_ylabel("Test Loss")
+    plt.savefig(f"test_loss_plot_net50{top_20}{skip}{weighted}.png", dpi=300, bbox_inches="tight")
     plt.show()
