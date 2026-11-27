@@ -409,7 +409,7 @@ if __name__ == "__main__":
     plt.title(f"Grad-CAM prediction {prediction}")
     plt.axis("off")
     plt.tight_layout()
-    plt.savefig(f"grad_cam_net50{top_20}{skip}{weighted}.png", dpi=300, bbox_inches="tight")
+    plt.savefig(f"grad_cam_net50{top_20}{skip}{weighted}_{timestamp}.png", dpi=300, bbox_inches="tight")
     plt.show()
 
     cm = confusion_matrix(
@@ -434,7 +434,7 @@ if __name__ == "__main__":
         colorbar=True,
     )
     ax.set_title("ResNet 50 confusion matrix")
-    plt.savefig(f"top_20_matrix_net50{top_20}{skip}{weighted}.png", dpi=300, bbox_inches="tight")
+    plt.savefig(f"top_20_matrix_net50{top_20}{skip}{weighted}_{timestamp}.png", dpi=300, bbox_inches="tight")
     fig.tight_layout()
     plt.show()
 
@@ -443,5 +443,5 @@ if __name__ == "__main__":
     loss_ax.set_title(f"Test loss over time with lr={learning_rate}")
     loss_ax.set_xlabel("Epoch")
     loss_ax.set_ylabel("Test Loss")
-    plt.savefig(f"test_loss_plot_net50{top_20}{skip}{weighted}.png", dpi=300, bbox_inches="tight")
+    plt.savefig(f"test_loss_plot_net50{top_20}{skip}{weighted}_{timestamp}.png", dpi=300, bbox_inches="tight")
     plt.show()
